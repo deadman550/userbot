@@ -1,5 +1,4 @@
 import os
-import aiohttp
 import asyncio
 import google.generativeai as genai
 from groq import Groq
@@ -25,7 +24,6 @@ GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 groq_client = Groq(api_key=GROQ_KEY) if GROQ_KEY else None
 if GEMINI_KEY:
     genai.configure(api_key=GEMINI_KEY)
-    # Safety settings to prevent "None" response for sensitive topics
     safety = [
         {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
         {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -39,20 +37,21 @@ else:
 mark_plugin_loaded(PLUGIN_NAME)
 
 # =====================
-# HELP & EXPLAIN REGISTRY
+# HELP & REGISTRY
 # =====================
 register_help(
     "ai",
-    ".ai <query> - Hybrid Mode (Edit Support)\n"
-    ".aai, .jarvis, .edith - Gemini Mode\n"
-    ".aihealth - Check API Status"
+    ".ai <query> - Hybrid Mode (Supports Reply Context)\n"
+    ".aai, .jarvis, .edith - Gemini Dedicated\n"
+    ".aihealth - Detailed API Status Check"
 )
 
 register_explain(
     "ai",
-    "🤖 **Omni-AI (Edit-to-Response)**\n\n"
-    "Edits your command message into the response to keep chat clean.\n"
-    "Supports Reply & Web Search. Auto-Delete: 200s."
+    "🤖 **Omni-AI (Pro Edition)**\n\n"
+    "Supports Contextual Replies. If you reply to a message with '.ai translate this',\n"
+    "it will take both your command and the replied text.\n"
+    "Auto-Delete: 200s | Edit-Mode enabled."
 )
 
 # =====================
@@ -70,8 +69,10 @@ async def get_gemini_resp(prompt, context):
     if not gemini_model: return None, None
     try:
         sys_msg = f"Role: Gemini 1.5 Flash. Date: April 12, 2026. Web Context: {context}"
-        response = await asyncio.to_thread(gemini_model.generate_content, f"{sys_msg}\n\nUser: {prompt}")
-        return (response.text, "Gemini 1.5 Flash") if response.text else (None, None)
+        response = await asyncio.to_thread(gemini_model.generate_content, f"{sys_msg}\n\nUser Question: {prompt}")
+        if response and response.text:
+            return response.text, "Gemini 1.5 Flash"
+        return None, None
     except Exception as e:
         print(f"Gemini Error: {e}")
         return None, None
@@ -89,60 +90,64 @@ async def get_groq_resp(prompt, context):
     except: return None, None
 
 # =====================
+# UTILS
+# =====================
+
+async def get_full_query(e):
+    """Combines command text and replied message text for full context"""
+    cmd_text = e.pattern_match.group(2) if hasattr(e.pattern_match, 'group') and len(e.pattern_match.groups()) >= 2 else e.pattern_match.group(1)
+    if e.is_reply:
+        reply_msg = await e.get_reply_message()
+        if reply_msg and reply_msg.text:
+            # Combine: [Instruction] + [Text to process]
+            return f"Instruction: {cmd_text}\n\nContent to process: {reply_msg.text}"
+    return cmd_text
+
+# =====================
 # COMMAND HANDLERS
 # =====================
 
 @bot.on(events.NewMessage(pattern=r"\.aihealth$"))
-async def health(e):
+async def health_check(e):
     if not is_owner(e): return
-    status = "🔍 **Omni-AI Health**\n\n"
-    status += f"🤖 Groq: {'🟢' if GROQ_KEY else '🔴'}\n"
-    status += f"♊ Gemini: {'🟢' if GEMINI_KEY else '🔴'}\n"
+    status = "🔍 **Omni-AI Health Report**\n\n"
+    # Check Groq
+    status += f"🤖 **Groq (Llama):** {'🟢 Active' if GROQ_KEY else '🔴 Missing'}\n"
+    # Check Gemini
+    status += f"♊ **Gemini (Flash):** {'🟢 Active' if GEMINI_KEY else '🔴 Missing'}\n"
+    # Check DDGS
     try:
         with DDGS() as ddgs:
             list(ddgs.text("test", max_results=1))
-            status += "🌐 Web: 🟢"
-    except: status += "🌐 Web: 🔴"
-    await auto_delete(await e.edit(status), 15)
-
-# GEMINI ONLY (.aai, .jarvis, .edith)
-@bot.on(events.NewMessage(pattern=r"\.(aai|jarvis|edith)(?:\s+([\s\S]+))?$"))
-async def gemini_cmd(e):
-    if not is_owner(e): return
-    query = e.pattern_match.group(2)
-    if not query and e.is_reply:
-        query = (await e.get_reply_message()).text
+            status += "🌐 **Web Search:** 🟢 Online"
+    except: status += "🌐 **Web Search:** 🔴 Offline"
     
+    await auto_delete(await e.edit(status), 20)
+
+@bot.on(events.NewMessage(pattern=r"\.(aai|jarvis|edith)(?:\s+([\s\S]+))?$"))
+async def gemini_strict(e):
+    if not is_owner(e): return
+    query = await get_full_query(e)
     if not query: return await auto_delete(await e.edit("`Puchna kya hai?`"), 5)
     
-    await e.edit(f"`🚀 {e.pattern_match.group(1).upper()} is processing...`" )
+    await e.edit(f"`🚀 {e.pattern_match.group(1).upper()} is analyzing...`" )
     context = await get_web_context(query)
     ans, src = await get_gemini_resp(query, context)
     
-    if not ans: ans = "❌ Gemini returned None. Check Safety/Quota."
-    
-    final_msg = f"✨ **Model:** `{src}`\n\n{ans}"
-    # Truncate if too long
-    res = await e.edit(final_msg[:4095])
-    await auto_delete(res, 200)
+    if not ans: ans = "❌ Gemini failed. Check logs/Safety."
+    await auto_delete(await e.edit(f"✨ **Model:** `{src}`\n\n{ans}"[:4090]), 200)
 
-# HYBRID MODE (.ai)
 @bot.on(events.NewMessage(pattern=r"\.ai(?:\s+([\s\S]+))?$"))
 async def ai_hybrid(e):
     if not is_owner(e): return
-    # Avoid overlapping with .aai
     if e.text.startswith(".aai"): return 
     
-    query = e.pattern_match.group(1)
-    if not query and e.is_reply:
-        query = (await e.get_reply_message()).text
-        
+    query = await get_full_query(e)
     if not query: return
     
     await e.edit("`🤖 Smart Selecting AI...`" )
     context = await get_web_context(query)
     
-    # Parallel Run
     tasks = [get_gemini_resp(query, context), get_groq_resp(query, context)]
     results = await asyncio.gather(*tasks)
     
@@ -153,8 +158,5 @@ async def ai_hybrid(e):
             break
             
     if not final_ans: final_ans = "❌ All AI models failed."
-    
-    final_msg = f"✨ **Model:** `{source}`\n\n{final_ans}"
-    res = await e.edit(final_msg[:4095])
-    await auto_delete(res, 200)
-    
+    await auto_delete(await e.edit(f"✨ **Model:** `{source}`\n\n{final_ans}"[:4090]), 200)
+            

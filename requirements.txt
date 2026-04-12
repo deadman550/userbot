@@ -10,4 +10,4 @@ dnspython==2.4.2
 python-dotenv==1.0.1
 google-generativeai
 groq
-duckduckgo_search
+duckduckgo-search>=6.0.0

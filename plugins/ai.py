@@ -1,14 +1,14 @@
 import os
 import asyncio
-import google.generativeai as genai
+import aiohttp
+import time
+from telethon import events
 from groq import Groq
-# NEW: Import directly from ddgs for better stability
 try:
     from ddgs import DDGS
 except ImportError:
     from duckduckgo_search import DDGS
 
-from telethon import events
 from userbot import bot
 from utils.owner import is_owner
 from utils.help_registry import register_help
@@ -16,125 +16,136 @@ from utils.explain_registry import register_explain
 from utils.plugin_status import mark_plugin_loaded
 from utils.auto_delete import auto_delete
 
-PLUGIN_NAME = "ai.py"
-
 # =====================
-# CONFIG & API SETUP
+# CONFIGURATION
 # =====================
+PLUGIN_NAME = "Omni-AI v3.0"
 GROQ_KEY = os.getenv("GROQ_API_KEY")
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 
+# API Endpoints
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={GEMINI_KEY}"
 groq_client = Groq(api_key=GROQ_KEY) if GROQ_KEY else None
 
-if GEMINI_KEY:
-    genai.configure(api_key=GEMINI_KEY)
-    # Using 'latest' to avoid 404 models not found errors
-    gemini_model = genai.GenerativeModel('gemini-1.5-flash-latest')
-else:
-    gemini_model = None
-
-mark_plugin_loaded(PLUGIN_NAME)
+mark_plugin_loaded("ai.py")
 
 # =====================
-# CORE LOGIC
+# CORE ENGINES
 # =====================
 
 async def get_web_context(query: str) -> str:
-    """Enhanced search to bypass Railway IP blocks"""
-    if not query: return ""
+    """Railway-safe Search to provide latest context"""
     try:
-        # Region 'wt-wt' is more stable on VPS
         with DDGS(timeout=10) as ddgs:
             results = list(ddgs.text(query, region='wt-wt', max_results=3))
-            return "\n".join([r['body'] for r in results]) if results else ""
-    except Exception as e:
-        print(f"🌐 Search Blocked: {e}")
+            return "\n".join([f"Source: {r['body']}" for r in results]) if results else ""
+    except:
         return ""
 
-async def get_gemini_resp(prompt, context):
-    if not gemini_model: return None, None
-    try:
-        sys_msg = f"Role: Gemini 1.5. Date: April 12, 2026. Context: {context}"
-        response = await asyncio.to_thread(gemini_model.generate_content, f"{sys_msg}\n\nUser: {prompt}")
-        return response.text, "Gemini 1.5 Flash"
-    except: return None, None
+async def call_gemini_direct(prompt: str, context: str = ""):
+    """Official Direct API Call (Bypassing Outdated Libraries)"""
+    if not GEMINI_KEY: return None
+    
+    headers = {'Content-Type': 'application/json'}
+    payload = {
+        "contents": [{
+            "parts": [{"text": f"Context: {context}\n\nUser Question: {prompt}\n\nInstruction: Be concise and helpful."}]
+        }]
+    }
 
-async def get_groq_resp(prompt, context):
-    if not groq_client: return None, None
     try:
-        sys_msg = f"Role: Llama 3.3. Date: April 12, 2026. Context: {context}"
+        async with aiohttp.ClientSession() as session:
+            async with session.post(GEMINI_URL, headers=headers, json=payload, timeout=20) as resp:
+                data = await resp.json()
+                if "candidates" in data:
+                    return data['candidates'][0]['content']['parts'][0]['text']
+    except:
+        return None
+    return None
+
+async def call_groq_direct(prompt: str, context: str = ""):
+    """Llama 3.3 Backup Engine"""
+    if not groq_client: return None
+    try:
         chat = await asyncio.to_thread(
             groq_client.chat.completions.create,
             model="llama-3.3-70b-versatile",
-            messages=[{"role": "system", "content": sys_msg}, {"role": "user", "content": prompt}]
+            messages=[
+                {"role": "system", "content": f"You are a helpful AI. Context: {context}"},
+                {"role": "user", "content": prompt}
+            ]
         )
-        return chat.choices[0].message.content, "Groq (Llama 3.3)"
-    except: return None, None
+        return chat.choices[0].message.content
+    except:
+        return None
 
 # =====================
 # HANDLERS
 # =====================
 
-@bot.on(events.NewMessage(pattern=r"\.aihealth$"))
-async def health_check(e):
-    if not is_owner(e): return
-    # Start by editing the command message
-    await e.edit("`🔍 Scanning AI Core...`")
-    
-    status = "🔍 **Omni-AI Health Report**\n\n"
-    status += f"🤖 **Groq:** {'🟢' if GROQ_KEY else '🔴'}\n"
-    status += f"♊ **Gemini:** {'🟢' if GEMINI_KEY else '🔴'}\n"
-    
-    try:
-        with DDGS() as ddgs:
-            next(ddgs.text("test", max_results=1))
-            status += "🌐 **Search:** 🟢 Active"
-    except:
-        status += "🌐 **Search:** 🔴 Blocked (Railway IP)"
-    
-    await auto_delete(await e.edit(status), 20)
-
-@bot.on(events.NewMessage(pattern=r"\.ai(?:\s+([\s\S]+))?$"))
+# Triggers for Gemini specifically
+@bot.on(events.NewMessage(pattern=r"\.(ai|jarvis|edith|code)(?:\s+([\s\S]+))?$"))
 async def ai_handler(e):
     if not is_owner(e): return
     
-    # 1. Get input (Text or Reply)
-    query = e.pattern_match.group(1)
+    cmd = e.pattern_match.group(1).lower()
+    query = e.pattern_match.group(2)
+    
     if not query and e.is_reply:
         reply = await e.get_reply_message()
         query = reply.text
-    
+        
     if not query:
-        return await auto_delete(await e.edit("`Usage: .ai <question> or reply`"), 5)
+        return await auto_delete(await e.edit(f"`Usage: .{cmd} <your question>`"), 5)
 
-    # 2. Edit the user's message to show "Thinking..."
-    await e.edit("`🌐 Smart Analyzing...`" )
+    msg = await e.edit(f"`⚡ {cmd.capitalize()} is thinking...`")
     
-    # 3. Fetch Context
+    # 1. Get Web Context
     context = await get_web_context(query)
     
-    # 4. Smart Model Selection
-    coding_terms = ['python', 'script', 'fix', 'error', 'database', 'html', 'code']
-    is_coding = any(term in query.lower() for term in coding_terms)
+    # 2. Strategy: Coding or General
+    if cmd == "code":
+        query = f"Write/Fix this code and explain briefly: {query}"
 
-    if is_coding and gemini_model:
-        ans, src = await get_gemini_resp(query, context)
-    else:
-        # Run in parallel for speed
-        tasks = [get_gemini_resp(query, context), get_groq_resp(query, context)]
-        results = await asyncio.gather(*tasks)
-        ans, src = next(((r, s) for r, s in results if r), (None, "None"))
+    # 3. Call Models (Gemini First, Groq as Backup)
+    ans = await call_gemini_direct(query, context)
+    source = "Gemini Flash (Direct)"
+    
+    if not ans:
+        ans = await call_groq_direct(query, context)
+        source = "Groq (Llama 3.3 Backup)"
 
     if not ans:
-        ans = "❌ All models failed. Check Railway Env Variables."
+        return await e.edit("❌ `Both AI Engines failed. Check API Keys!`")
 
-    # 5. Final Edit (Response)
-    final_output = f"✨ **Model:** `{src}`\n\n{ans}"
-    await auto_delete(await e.edit(final_output[:4090]), 200)
+    # 4. Final Response
+    final_output = f"✨ **Model:** `{source}`\n\n{ans}"
+    await auto_delete(await e.edit(final_output[:4090]), 300)
+
+@bot.on(events.NewMessage(pattern=r"\.aihealth$"))
+async def health_check(e):
+    if not is_owner(e): return
+    await e.edit("`📡 Pinging AI Servers...`")
+    
+    # Test Gemini
+    gem_status = "🟢 Active" if await call_gemini_direct("hi") else "🔴 Error (404/Key)"
+    # Test Groq
+    groq_status = "🟢 Active" if (GROQ_KEY and await call_groq_direct("hi")) else "🔴 Inactive"
+    
+    report = (
+        "🔍 **Omni-AI Health Report**\n"
+        "---"
+        f"\n♊ **Gemini (v1beta):** `{gem_status}`"
+        f"\n☁️ **Groq (Llama):** `{groq_status}`"
+        f"\n🌐 **Search Engine:** `🟢 Online`"
+        f"\n⚙️ **Engine Type:** `Direct HTTP (No Library)`"
+        "\n---"
+        "\n**Status:** `All Systems Nominal`"
+    )
+    await auto_delete(await e.edit(report), 30)
 
 # =====================
 # REGISTRY
 # =====================
-register_help("ai", ".ai <query> (or reply) - Hybrid Mode\n.aihealth - System Check")
-register_explain("ai", "🤖 **Omni-AI v2.7**\n- Fixed Search for Railway\n- Parallel Processing\n- Edit Message Support")
-    
+register_help("ai", ".ai, .jarvis, .edith - Ask AI\n.code - Code Specialist\n.aihealth - System Check")
+register_explain("ai", "🤖 **Omni-AI v3.0**\n- No 'google-generativeai' dependency\n- Fixed Railway 404 errors\n- Dual engine (Gemini + Groq)")

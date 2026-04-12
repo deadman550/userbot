@@ -1,9 +1,8 @@
-# plugins/scheduler.py
-
 import asyncio
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from bson import ObjectId
+import pytz  # Timezone handling ke liye
 
 from telethon import events
 
@@ -18,6 +17,21 @@ from utils.mongo import mongo
 
 PLUGIN_NAME = "scheduler.py"
 
+# Timezone Setup
+IST = pytz.timezone("Asia/Kolkata")
+
+def get_ist_now():
+    """Returns current time in India (IST)"""
+    return datetime.now(IST)
+
+def format_to_ist_12hr(dt_obj):
+    """Converts UTC/Naive datetime to IST 12-hour string"""
+    if dt_obj.tzinfo is None:
+        # Agar naive hai toh usey UTC maan kar IST mein convert karo
+        dt_obj = dt_obj.replace(tzinfo=UTC)
+    ist_time = dt_obj.astimezone(IST)
+    return ist_time.strftime("%Y-%m-%d %I:%M %p")
+
 # =====================
 # PLUGIN LOAD
 # =====================
@@ -25,10 +39,9 @@ mark_plugin_loaded(PLUGIN_NAME)
 print("✔ scheduler.py loaded")
 
 # =====================
-# MONGO SETUP (SAFE)
+# MONGO SETUP
 # =====================
 if mongo is None:
-    print("⚠️ MongoDB not connected — scheduler disabled")
     col = None
 else:
     try:
@@ -38,206 +51,122 @@ else:
         col = None
 
 # =====================
-# HELP
+# HELP & EXPLAIN
 # =====================
 register_help(
     "scheduler",
-    ".schedule TIME TEXT\n"
-    ".schedules\n"
-    ".cancelschedule ID\n\n"
-    "• Persistent scheduler (MongoDB)\n"
-    "• Owner only"
-)
-
-# =====================
-# EXPLAIN
-# =====================
-register_explain(
-    "scheduler",
-    """
-⏰ **SCHEDULER**
-
-.schedule 10m Hello  
-.schedule 2h Good night  
-.schedule 2026-02-01 09:00 Happy Birthday  
-
-.schedules  
-.cancelschedule ID  
-
-• Restart safe  
-• MongoDB based
-"""
+    ".schedule TIME TEXT\n.schedules\n.cancelschedule ID\n\n• Format: 10m, 2h, or YYYY-MM-DD HH:MM"
 )
 
 # =====================
 # TIME PARSER
 # =====================
 def parse_time(text: str):
+    now_utc = datetime.now(UTC)
     if re.fullmatch(r"\d+m", text):
-        return datetime.utcnow() + timedelta(minutes=int(text[:-1]))
-
+        return now_utc + timedelta(minutes=int(text[:-1]))
     if re.fullmatch(r"\d+h", text):
-        return datetime.utcnow() + timedelta(hours=int(text[:-1]))
-
+        return now_utc + timedelta(hours=int(text[:-1]))
     try:
-        return datetime.strptime(text, "%Y-%m-%d %H:%M")
+        # User input ko local (IST) maan kar UTC mein convert karna
+        local_dt = datetime.strptime(text, "%Y-%m-%d %H:%M")
+        local_dt = IST.localize(local_dt)
+        return local_dt.astimezone(UTC)
     except Exception:
         return None
 
 # =====================
-# BACKGROUND WORKER (ULTRA SAFE)
+# BACKGROUND WORKER
 # =====================
 async def scheduler_worker():
-    if col is None:
-        return
-
-    await asyncio.sleep(10)  # startup buffer
+    if col is None: return
+    await asyncio.sleep(10)
 
     while True:
         try:
-            now = datetime.utcnow()
-
-            try:
-                tasks = col.find({
-                    "run_at": {"$lte": now},
-                    "done": False
-                })
-            except Exception:
-                # Mongo temporary issue → wait silently
-                await asyncio.sleep(10)
-                continue
+            now_utc = datetime.now(UTC)
+            tasks = col.find({"run_at": {"$lte": now_utc}, "done": False})
 
             for task in tasks:
                 try:
                     await bot.send_message(task["chat_id"], task["text"])
-                    col.update_one(
-                        {"_id": task["_id"]},
-                        {"$set": {"done": True}}
-                    )
+                    col.update_one({"_id": task["_id"]}, {"$set": {"done": True}})
                 except Exception:
                     continue
-
         except Exception as ex:
-            # only log, do NOT break plugin
             await log_error(bot, PLUGIN_NAME, ex)
-
         await asyncio.sleep(5)
 
-# start worker safely
 if col is not None:
     bot.loop.create_task(scheduler_worker())
 
 # =====================
-# .schedule
+# COMMANDS
 # =====================
+
 @bot.on(events.NewMessage(pattern=r"\.schedule(?:\s+([\s\S]+))?$"))
 async def schedule_cmd(e):
-    if not is_owner(e) or col is None:
-        return
-
+    if not is_owner(e) or col is None: return
     try:
         await e.delete()
-
         args = (e.pattern_match.group(1) or "").split(None, 1)
         if len(args) < 2:
-            msg = await bot.send_message(e.chat_id, "Usage:\n.schedule TIME TEXT")
+            msg = await bot.send_message(e.chat_id, "Usage: `.schedule 10m Message`")
             return await auto_delete(msg, 6)
 
-        when = parse_time(args[0])
-        if not when:
-            msg = await bot.send_message(e.chat_id, "❌ Invalid time format")
+        when_utc = parse_time(args[0])
+        if not when_utc:
+            msg = await bot.send_message(e.chat_id, "❌ Format: `10m`, `2h` or `2026-04-12 15:30` (IST)")
             return await auto_delete(msg, 6)
 
         doc = {
             "chat_id": e.chat_id,
             "text": args[1],
-            "run_at": when,
+            "run_at": when_utc,
             "done": False,
-            "created_at": datetime.utcnow()
+            "created_at": datetime.now(UTC)
         }
-
-        try:
-            res = col.insert_one(doc)
-        except Exception:
-            msg = await bot.send_message(
-                e.chat_id,
-                "❌ MongoDB temporary unavailable. Try again."
-            )
-            return await auto_delete(msg, 6)
-
-        msg = await bot.send_message(
-            e.chat_id,
-            f"⏰ **Scheduled**\nID: `{res.inserted_id}`\nAt: `{when}`"
-        )
-        await auto_delete(msg, 8)
-
+        res = col.insert_one(doc)
+        
+        # Displaying in IST 12-hour format
+        ist_str = format_to_ist_12hr(when_utc)
+        msg = await bot.send_message(e.chat_id, f"⏰ **Scheduled**\nID: `{res.inserted_id}`\nAt: `{ist_str}` (IST)")
+        await auto_delete(msg, 10)
     except Exception as ex:
-        mark_plugin_error(PLUGIN_NAME, ex)
         await log_error(bot, PLUGIN_NAME, ex)
 
-# =====================
-# .schedules
-# =====================
 @bot.on(events.NewMessage(pattern=r"\.schedules$"))
 async def list_schedules(e):
-    if not is_owner(e) or col is None:
-        return
-
+    if not is_owner(e) or col is None: return
     try:
         await e.delete()
-
-        try:
-            tasks = list(col.find({"done": False}))
-        except Exception:
-            msg = await bot.send_message(
-                e.chat_id,
-                "❌ MongoDB temporary unavailable"
-            )
-            return await auto_delete(msg, 6)
-
+        tasks = list(col.find({"done": False}))
         if not tasks:
             msg = await bot.send_message(e.chat_id, "📭 No pending schedules")
             return await auto_delete(msg, 6)
 
-        text = "📅 **Scheduled Messages**\n\n"
+        text = "📅 **Scheduled Messages (IST)**\n\n"
         for t in tasks:
-            text += f"• `{t['_id']}` → `{t['run_at']}`\n"
+            ist_time = format_to_ist_12hr(t['run_at'])
+            text += f"• `{t['_id']}`\n  └ ⏰ `{ist_time}`\n"
 
         msg = await bot.send_message(e.chat_id, text)
-        await auto_delete(msg, 15)
-
+        await auto_delete(msg, 20)
     except Exception as ex:
-        mark_plugin_error(PLUGIN_NAME, ex)
         await log_error(bot, PLUGIN_NAME, ex)
 
-# =====================
-# .cancelschedule
-# =====================
 @bot.on(events.NewMessage(pattern=r"\.cancelschedule(?: (.*))?$"))
 async def cancel_schedule(e):
-    if not is_owner(e) or col is None:
-        return
-
+    if not is_owner(e) or col is None: return
     try:
         await e.delete()
-
         sid = (e.pattern_match.group(1) or "").strip()
         if not sid:
-            msg = await bot.send_message(e.chat_id, "Usage:\n.cancelschedule ID")
+            msg = await bot.send_message(e.chat_id, "Usage: `.cancelschedule ID`")
             return await auto_delete(msg, 6)
-
-        try:
-            col.delete_one({"_id": ObjectId(sid)})
-        except Exception:
-            msg = await bot.send_message(
-                e.chat_id,
-                "❌ Invalid ID or Mongo unavailable"
-            )
-            return await auto_delete(msg, 6)
-
-        msg = await bot.send_message(e.chat_id, "❌ Schedule cancelled")
+        
+        col.delete_one({"_id": ObjectId(sid)})
+        msg = await bot.send_message(e.chat_id, "✅ Schedule cancelled")
         await auto_delete(msg, 6)
-
     except Exception as ex:
-        mark_plugin_error(PLUGIN_NAME, ex)
         await log_error(bot, PLUGIN_NAME, ex)

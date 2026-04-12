@@ -37,9 +37,9 @@ mark_plugin_loaded(PLUGIN_NAME)
 # =====================
 register_help(
     "ai",
-    ".ai QUESTION\n(reply) .ai\n\n"
+    ".ai QUESTION\n(reply) .ai\n.aihealth\n\n"
     "• Ask Omni-AI (Groq + Gemini + Web Search)\n"
-    "• Automatically switches if one fails\n"
+    "• .aihealth: Check API connectivity\n"
     "• Owner only | Auto delete enabled"
 )
 
@@ -47,7 +47,7 @@ register_explain(
     "ai",
     "🤖 **Omni-AI – 2026 Edition**\n\n"
     "Combined power of Llama 3.1 & Gemini with live web search.\n"
-    "Usage: .ai <query>"
+    "Usage: .ai <query> or .aihealth"
 )
 
 # =====================
@@ -66,23 +66,23 @@ async def get_web_context(query: str) -> str:
 async def ask_omni_ai(prompt: str) -> tuple:
     """Dual-API Fallback Logic"""
     context = await get_web_context(prompt)
-    system_prompt = f"Today is April 7, 2026. Use this web context if relevant: {context}"
+    system_prompt = f"Today is April 12, 2026. Use this web context if relevant: {context}"
     
-    # Attempt 1: Groq (Llama 3.1)
+    # Attempt 1: Groq
     if groq_client:
         try:
             chat = groq_client.chat.completions.create(
-                model="llama-3.1-70b-versatile",
+                model="llama-3.3-70b-versatile",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt}
                 ]
             )
-            return chat.choices[0].message.content, "Groq (Llama 3.1)"
+            return chat.choices[0].message.content, "Groq (Llama 3)"
         except Exception:
-            pass # Fallback
+            pass 
 
-    # Attempt 2: Gemini 1.5 Flash
+    # Attempt 2: Gemini
     if gemini_model:
         try:
             full_prompt = f"{system_prompt}\n\nUser Question: {prompt}"
@@ -91,11 +91,37 @@ async def ask_omni_ai(prompt: str) -> tuple:
         except Exception as ex:
             return f"❌ Error: {str(ex)}", "None"
 
-    return "❌ No API Keys (GROQ_API_KEY/GEMINI_API_KEY) found in Railway.", "Error"
+    return "❌ No API Keys found.", "Error"
 
 # =====================
-# COMMAND HANDLER
+# COMMAND HANDLERS
 # =====================
+
+@bot.on(events.NewMessage(pattern=r"\.aihealth$"))
+async def ai_health_cmd(e):
+    """Checks if APIs are alive"""
+    if not is_owner(e):
+        return
+    
+    status = "🔍 **AI Health Report (Omni-AI)**\n\n"
+    
+    # Check Groq
+    status += "🟢 **Groq:** Connected\n" if GROQ_KEY else "🔴 **Groq:** KEY MISSING\n"
+    
+    # Check Gemini
+    status += "🟢 **Gemini:** Configured\n" if GEMINI_KEY else "🔴 **Gemini:** KEY MISSING\n"
+    
+    # Check Web Search (Live Test)
+    try:
+        with DDGS() as ddgs:
+            list(ddgs.text("test", max_results=1))
+            status += "🟢 **Web Search:** Online\n"
+    except:
+        status += "🔴 **Web Search:** Offline\n"
+    
+    msg = await e.respond(status)
+    await auto_delete(msg, 15)
+
 @bot.on(events.NewMessage(pattern=r"\.ai(?:\s+([\s\S]+))?$"))
 async def ai_cmd(e):
     if not is_owner(e):
@@ -108,30 +134,25 @@ async def ai_cmd(e):
             text = r.text if r else None
 
         if not text:
+            if e.pattern_match.group(0) == ".aihealth": return # Prevent conflict
             msg = await bot.send_message(e.chat_id, "Usage: `.ai <question>`")
             return await auto_delete(msg, 6)
 
-        # Thinking Animation
         thinking = await bot.send_message(e.chat_id, "`🌐 Searching 2026 Web & Thinking...`")
-        
-        # Get Answer
         answer, source = await ask_omni_ai(text)
 
         await thinking.delete()
-        try:
-            await e.delete()
-        except:
-            pass
+        try: await e.delete()
+        except: pass
 
         final_msg = f"🤖 **AI Answer ({source})**\n\n{answer}"
         
-        # Split message if it's too long for Telegram
         if len(final_msg) > 4095:
             msg = await bot.send_message(e.chat_id, final_msg[:4090])
         else:
             msg = await bot.send_message(e.chat_id, final_msg)
 
-        await auto_delete(msg, 60) # Increased to 60s for reading long answers
+        await auto_delete(msg, 60)
 
     except Exception as ex:
         mark_plugin_error(PLUGIN_NAME, ex)

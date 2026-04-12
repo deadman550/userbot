@@ -5,55 +5,49 @@ from userbot import bot
 from utils.owner import is_owner
 
 # =====================
-# HARDCODED CONFIG (FOR TEST)
+# HARDCODED CONFIG
 # =====================
-TEST_GEMINI_KEY = "AIzaSyCJsC2ZN8DV85VFAjoin75kT_xMms1bdUM" # <--- Yahan apni key dalo
-TEST_MODEL_NAME = "gemini-1.5-flash-latest"   # <--- Ye hamesha stable rehta hai
+TEST_GEMINI_KEY = "AIzaSyCJsC2ZN8DV85VFAjoin75kT_xMms1bdUM"
 
 # Configuration
 genai.configure(api_key=TEST_GEMINI_KEY)
-model = genai.GenerativeModel(model_name=TEST_MODEL_NAME)
+
+async def get_working_model(query):
+    """Sare possible models try karega jo aapki library support karti ho"""
+    # Order: Latest -> Stable -> Legacy
+    test_models = ['gemini-1.5-flash-latest', 'gemini-1.5-flash', 'gemini-pro']
+    
+    for m_name in test_models:
+        try:
+            model = genai.GenerativeModel(model_name=m_name)
+            # Dummy call to check if model exists
+            response = await asyncio.to_thread(model.generate_content, query)
+            return response.text, m_name
+        except Exception as e:
+            if "404" in str(e) or "not found" in str(e).lower():
+                continue # Agla model try karo
+            return f"API_ERROR: {str(e)}", None
+    return "NOT_FOUND", None
 
 @bot.on(events.NewMessage(pattern=r"\.aitest(?:\s+([\s\S]+))?$"))
 async def gemini_testing(e):
     if not is_owner(e): return
     
-    # Input pick karo (Text ya Reply)
-    query = e.pattern_match.group(1)
-    if not query and e.is_reply:
-        reply = await e.get_reply_message()
-        query = reply.text
-        
+    query = e.pattern_match.group(1) or (await e.get_reply_message()).text if e.is_reply else None
     if not query:
-        return await e.edit("`Bhai, kuch likho toh sahi test karne ke liye!`")
+        return await e.edit("`Bhai, kuch text toh dalo!`")
 
-    # Step 1: Edit message to show processing
-    await e.edit("`⚡ Gemini Hardcoded Test in progress...`")
+    await e.edit("`⚡ Checking supported Gemini models on this server...`")
 
-    try:
-        # Step 2: API Call (Using Thread for non-blocking)
-        response = await asyncio.to_thread(
-            model.generate_content, 
-            query
-        )
-        
-        if response and response.text:
-            final_ans = response.text
-            # Step 3: Final Edit with result
-            await e.edit(f"✅ **Gemini Test Success!**\n\n{final_ans}")
-        else:
-            await e.edit("❌ **API Success but empty response.** Check Safety Settings.")
-            
-    except Exception as ex:
-        # Step 4: Detail Error dekhne ke liye
-        error_msg = str(ex)
-        if "API_KEY_INVALID" in error_msg:
-            await e.edit("❌ **Error:** API Key galat hai bhai.")
-        elif "404" in error_msg:
-            await e.edit("❌ **Error:** Model name (1.5-flash-latest) nahi mila.")
-        else:
-            await e.edit(f"❌ **Direct API Error:**\n`{error_msg}`")
+    ans, successful_model = await get_working_model(query)
 
-# Help Registry (Optional for test)
+    if successful_model:
+        await e.edit(f"✅ **Gemini Test Success!**\n**Model Path:** `{successful_model}`\n\n{ans}")
+    elif ans == "NOT_FOUND":
+        await e.edit("❌ **Error:** Aapki `google-generativeai` library bahut purani hai. Requirements mein `==0.8.3` karke Clear Cache deploy karo.")
+    else:
+        await e.edit(f"❌ **Direct API Error:**\n`{ans}`")
+
 from utils.help_registry import register_help
-register_help("aitest", ".aitest <query> - Direct Hardcoded Gemini Test")
+register_help("aitest", ".aitest <query> - Smart Hardcoded Gemini Test")
+    

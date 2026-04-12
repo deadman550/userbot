@@ -37,16 +37,16 @@ mark_plugin_loaded(PLUGIN_NAME)
 # =====================
 register_help(
     "ai",
-    ".ai QUESTION\n(reply) .ai\n.aihealth\n\n"
-    "• Smart Switch: Gemini for Code | Llama for Speed\n"
-    "• Owner only | Auto delete enabled"
+    ".ai <question>\n.aihealth\n\n"
+    "• Smart Logic: Auto-switches between Gemini & Llama\n"
+    "• Parallel Processing for zero lag."
 )
 
 register_explain(
     "ai",
-    "🤖 **Omni-AI – 2026 Parallel Edition**\n\n"
-    "Runs Gemini and Llama 3 in parallel to give the best answer.\n"
-    "Usage: .ai <query>"
+    "🤖 **Omni-AI (2026 Edition)**\n\n"
+    "Combined power of Gemini (for Coding) and Llama 3 (for Speed/Web).\n"
+    "Everything runs in parallel!"
 )
 
 # =====================
@@ -54,31 +54,32 @@ register_explain(
 # =====================
 
 async def get_web_context(query: str) -> str:
-    """Fetches latest 2026 info from DuckDuckGo"""
     try:
         with DDGS() as ddgs:
             results = [r['body'] for r in ddgs.text(query, max_results=3)]
-            return "\n".join(results) if results else ""
+            return "\n".join(results) if results else "No live web data found."
     except:
-        return ""
+        return "Web search failed."
 
-async def get_gemini_resp(prompt, system):
-    """Gemini Worker"""
+async def get_gemini_resp(prompt, context):
     if not gemini_model: return None, None
     try:
-        response = await asyncio.to_thread(gemini_model.generate_content, f"{system}\n\nUser: {prompt}")
+        # Strict role-play for Gemini
+        sys_msg = f"You are Gemini 1.5 Flash by Google. Today is April 12, 2026. Web Context: {context}"
+        response = await asyncio.to_thread(gemini_model.generate_content, f"{sys_msg}\n\nUser Question: {prompt}")
         return response.text, "Gemini 1.5 Flash"
     except:
         return None, None
 
-async def get_groq_resp(prompt, system):
-    """Groq Worker"""
+async def get_groq_resp(prompt, context):
     if not groq_client: return None, None
     try:
+        # Strict role-play for Llama
+        sys_msg = f"You are Llama 3.3 by Meta (via Groq). Today is April 12, 2026. Web Context: {context}"
         chat = await asyncio.to_thread(
             groq_client.chat.completions.create,
             model="llama-3.3-70b-versatile",
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}]
+            messages=[{"role": "system", "content": sys_msg}, {"role": "user", "content": prompt}]
         )
         return chat.choices[0].message.content, "Groq (Llama 3.3)"
     except:
@@ -91,17 +92,11 @@ async def get_groq_resp(prompt, system):
 @bot.on(events.NewMessage(pattern=r"\.aihealth$"))
 async def ai_health_cmd(e):
     if not is_owner(e): return
-    status = "🔍 **AI Health Report**\n\n"
-    status += "🟢 **Groq:** Connected\n" if GROQ_KEY else "🔴 **Groq:** Missing\n"
-    status += "🟢 **Gemini:** Configured\n" if GEMINI_KEY else "🔴 **Gemini:** Missing\n"
-    try:
-        with DDGS() as ddgs:
-            list(ddgs.text("test", max_results=1))
-            status += "🟢 **Web Search:** Online\n"
-    except:
-        status += "🔴 **Web Search:** Offline\n"
+    status = "🔍 **AI System Health**\n\n"
+    status += f"{'🟢' if GROQ_KEY else '🔴'} **Groq API**\n"
+    status += f"{'🟢' if GEMINI_KEY else '🔴'} **Gemini API**\n"
     msg = await e.respond(status)
-    await auto_delete(msg, 15)
+    await auto_delete(msg, 10)
 
 @bot.on(events.NewMessage(pattern=r"\.ai(?:\s+([\s\S]+))?$"))
 async def ai_cmd(e):
@@ -111,36 +106,34 @@ async def ai_cmd(e):
         text = e.pattern_match.group(1)
         if not text and e.is_reply:
             r = await e.get_reply_message()
-            text = r.text if r else None
+            text = r.text
 
         if not text:
-            if e.pattern_match.group(0) == ".aihealth": return
-            msg = await bot.send_message(e.chat_id, "Usage: `.ai <question>`")
-            return await auto_delete(msg, 6)
+            if ".aihealth" in e.text: return
+            return await auto_delete(await e.reply("Usage: `.ai <question>`"), 5)
 
-        thinking = await bot.send_message(e.chat_id, "`🌐 Running Parallel Analysis...`")
+        thinking = await e.reply("`🤖 Omni-AI is thinking...`")
         
+        # 1. Fetch Web Context first
         context = await get_web_context(text)
-        system_prompt = (
-            "Today is April 12, 2026. Use this web context for info: " + context + 
-            "\nIf code is asked, prioritize clean Python structure."
-        )
-
-        # Start Parallel Tasks
-        tasks = [get_gemini_resp(text, system_prompt), get_groq_resp(text, system_prompt)]
+        
+        # 2. Run both models in parallel
+        tasks = [get_gemini_resp(text, context), get_groq_resp(text, context)]
         results = await asyncio.gather(*tasks)
 
-        # Smart Selection Logic
-        final_resp, source = None, "None"
-        is_coding = any(x in text.lower() for x in ['code', 'python', 'script', 'fix', 'error', 'function'])
+        # 3. Selection Logic
+        final_resp, source = None, "Error"
+        coding_keywords = ['python', 'code', 'script', 'fix', 'error', 'database', 'logic', 'def ', 'import ']
+        is_coding_query = any(k in text.lower() for k in coding_keywords)
 
-        # First priority: If coding query, take Gemini
-        for resp, src in results:
-            if resp and is_coding and src == "Gemini 1.5 Flash":
-                final_resp, source = resp, src
-                break
-        
-        # Second priority: Take whatever is valid if final_resp is still None
+        # Priority 1: If coding, pick Gemini
+        if is_coding_query:
+            for resp, src in results:
+                if resp and "Gemini" in src:
+                    final_resp, source = resp, src
+                    break
+
+        # Priority 2: If Gemini failed or not coding, pick Llama (fastest)
         if not final_resp:
             for resp, src in results:
                 if resp:
@@ -149,20 +142,20 @@ async def ai_cmd(e):
 
         await thinking.delete()
         if not final_resp:
-            final_resp = "❌ Both AI models failed to respond."
-            source = "Error"
+            final_resp = "❌ Models unreachable. Check Railway variables."
 
         try: await e.delete()
         except: pass
 
-        final_msg = f"🤖 **AI Answer ({source})**\n\n{final_resp}"
+        # Clean Output
+        final_msg = f"✨ **Model:** `{source}`\n\n{final_resp}"
         
         if len(final_msg) > 4095:
-            msg = await bot.send_message(e.chat_id, final_msg[:4090])
+            await bot.send_message(e.chat_id, final_msg[:4090])
         else:
-            msg = await bot.send_message(e.chat_id, final_msg)
+            await bot.send_message(e.chat_id, final_msg)
 
-        await auto_delete(msg, 120)
+        await auto_delete(None, 120) # Keeping chat clean
 
     except Exception as ex:
         mark_plugin_error(PLUGIN_NAME, ex)

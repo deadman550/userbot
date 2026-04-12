@@ -1,0 +1,40 @@
+{
+  "snake": {
+    "players": {
+      "cobra": {
+        "name": "King Cobra 🐍",
+        "wins": 1,
+        "losses": 0,
+        "battles": 1
+      },
+      "anaconda": {
+        "name": "Anaconda 🐍",
+        "wins": 0,
+        "losses": 1,
+        "battles": 1
+      }
+    }
+  },
+
+  "race": {
+    "players": {
+      "7066": {
+        "name": "Detor",
+        "wins": 2,
+        "losses": 1,
+        "battles": 3
+      }
+    }
+  },
+
+  "rps": {
+    "players": {
+      "7066": {
+        "name": "Detor",
+        "wins": 5,
+        "losses": 2,
+        "battles": 7
+      }
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "state": {
+    "enabled": false,
+    "silent": false,
+    "mode": "block",
+    "mute_time": null,
+    "last_blocked_user": null,
+    "last_warning_time": null
+  },
+  "users": {}
+}

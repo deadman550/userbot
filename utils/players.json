@@ -1,0 +1,24 @@
+{
+  "7066124462": {
+    "name": "Detor",
+    "coins": 0,
+    "level": 1,
+    "xp": 0,
+    "attack": 10,
+    "defense": 8,
+    "hp": 100,
+    "items": {},
+    "abilities": {
+      "coin_bonus": 0,
+      "reaction_bonus": 0.0,
+      "defuse_bomb": 0,
+      "lucky_chance": 0.0,
+      "highlight": false
+    },
+    "base_defense": {
+      "hp": 100,
+      "max_hp": 100
+    },
+    "last_play": 0
+  }
+}

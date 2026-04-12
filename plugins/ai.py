@@ -38,16 +38,15 @@ mark_plugin_loaded(PLUGIN_NAME)
 register_help(
     "ai",
     ".ai QUESTION\n(reply) .ai\n.aihealth\n\n"
-    "• Ask Omni-AI (Groq + Gemini + Web Search)\n"
-    "• .aihealth: Check API connectivity\n"
+    "• Smart Switch: Gemini for Code | Llama for Speed\n"
     "• Owner only | Auto delete enabled"
 )
 
 register_explain(
     "ai",
-    "🤖 **Omni-AI – 2026 Edition**\n\n"
-    "Combined power of Llama 3.1 & Gemini with live web search.\n"
-    "Usage: .ai <query> or .aihealth"
+    "🤖 **Omni-AI – 2026 Parallel Edition**\n\n"
+    "Runs Gemini and Llama 3 in parallel to give the best answer.\n"
+    "Usage: .ai <query>"
 )
 
 # =====================
@@ -63,35 +62,27 @@ async def get_web_context(query: str) -> str:
     except:
         return ""
 
-async def ask_omni_ai(prompt: str) -> tuple:
-    """Dual-API Fallback Logic"""
-    context = await get_web_context(prompt)
-    system_prompt = f"Today is April 12, 2026. Use this web context if relevant: {context}"
-    
-    # Attempt 1: Groq
-    if groq_client:
-        try:
-            chat = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            return chat.choices[0].message.content, "Groq (Llama 3)"
-        except Exception:
-            pass 
+async def get_gemini_resp(prompt, system):
+    """Gemini Worker"""
+    if not gemini_model: return None, None
+    try:
+        response = await asyncio.to_thread(gemini_model.generate_content, f"{system}\n\nUser: {prompt}")
+        return response.text, "Gemini 1.5 Flash"
+    except:
+        return None, None
 
-    # Attempt 2: Gemini
-    if gemini_model:
-        try:
-            full_prompt = f"{system_prompt}\n\nUser Question: {prompt}"
-            response = gemini_model.generate_content(full_prompt)
-            return response.text, "Gemini 1.5 Flash"
-        except Exception as ex:
-            return f"❌ Error: {str(ex)}", "None"
-
-    return "❌ No API Keys found.", "Error"
+async def get_groq_resp(prompt, system):
+    """Groq Worker"""
+    if not groq_client: return None, None
+    try:
+        chat = await asyncio.to_thread(
+            groq_client.chat.completions.create,
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}]
+        )
+        return chat.choices[0].message.content, "Groq (Llama 3.3)"
+    except:
+        return None, None
 
 # =====================
 # COMMAND HANDLERS
@@ -99,33 +90,22 @@ async def ask_omni_ai(prompt: str) -> tuple:
 
 @bot.on(events.NewMessage(pattern=r"\.aihealth$"))
 async def ai_health_cmd(e):
-    """Checks if APIs are alive"""
-    if not is_owner(e):
-        return
-    
-    status = "🔍 **AI Health Report (Omni-AI)**\n\n"
-    
-    # Check Groq
-    status += "🟢 **Groq:** Connected\n" if GROQ_KEY else "🔴 **Groq:** KEY MISSING\n"
-    
-    # Check Gemini
-    status += "🟢 **Gemini:** Configured\n" if GEMINI_KEY else "🔴 **Gemini:** KEY MISSING\n"
-    
-    # Check Web Search (Live Test)
+    if not is_owner(e): return
+    status = "🔍 **AI Health Report**\n\n"
+    status += "🟢 **Groq:** Connected\n" if GROQ_KEY else "🔴 **Groq:** Missing\n"
+    status += "🟢 **Gemini:** Configured\n" if GEMINI_KEY else "🔴 **Gemini:** Missing\n"
     try:
         with DDGS() as ddgs:
             list(ddgs.text("test", max_results=1))
             status += "🟢 **Web Search:** Online\n"
     except:
         status += "🔴 **Web Search:** Offline\n"
-    
     msg = await e.respond(status)
     await auto_delete(msg, 15)
 
 @bot.on(events.NewMessage(pattern=r"\.ai(?:\s+([\s\S]+))?$"))
 async def ai_cmd(e):
-    if not is_owner(e):
-        return
+    if not is_owner(e): return
 
     try:
         text = e.pattern_match.group(1)
@@ -134,25 +114,55 @@ async def ai_cmd(e):
             text = r.text if r else None
 
         if not text:
-            if e.pattern_match.group(0) == ".aihealth": return # Prevent conflict
+            if e.pattern_match.group(0) == ".aihealth": return
             msg = await bot.send_message(e.chat_id, "Usage: `.ai <question>`")
             return await auto_delete(msg, 6)
 
-        thinking = await bot.send_message(e.chat_id, "`🌐 Searching 2026 Web & Thinking...`")
-        answer, source = await ask_omni_ai(text)
+        thinking = await bot.send_message(e.chat_id, "`🌐 Running Parallel Analysis...`")
+        
+        context = await get_web_context(text)
+        system_prompt = (
+            "Today is April 12, 2026. Use this web context for info: " + context + 
+            "\nIf code is asked, prioritize clean Python structure."
+        )
+
+        # Start Parallel Tasks
+        tasks = [get_gemini_resp(text, system_prompt), get_groq_resp(text, system_prompt)]
+        results = await asyncio.gather(*tasks)
+
+        # Smart Selection Logic
+        final_resp, source = None, "None"
+        is_coding = any(x in text.lower() for x in ['code', 'python', 'script', 'fix', 'error', 'function'])
+
+        # First priority: If coding query, take Gemini
+        for resp, src in results:
+            if resp and is_coding and src == "Gemini 1.5 Flash":
+                final_resp, source = resp, src
+                break
+        
+        # Second priority: Take whatever is valid if final_resp is still None
+        if not final_resp:
+            for resp, src in results:
+                if resp:
+                    final_resp, source = resp, src
+                    break
 
         await thinking.delete()
+        if not final_resp:
+            final_resp = "❌ Both AI models failed to respond."
+            source = "Error"
+
         try: await e.delete()
         except: pass
 
-        final_msg = f"🤖 **AI Answer ({source})**\n\n{answer}"
+        final_msg = f"🤖 **AI Answer ({source})**\n\n{final_resp}"
         
         if len(final_msg) > 4095:
             msg = await bot.send_message(e.chat_id, final_msg[:4090])
         else:
             msg = await bot.send_message(e.chat_id, final_msg)
 
-        await auto_delete(msg, 60)
+        await auto_delete(msg, 120)
 
     except Exception as ex:
         mark_plugin_error(PLUGIN_NAME, ex)

@@ -18,7 +18,7 @@ from utils.auto_delete import auto_delete
 # =====================
 # CONFIGURATION
 # =====================
-PLUGIN_NAME = "Omni-AI v3.7"
+PLUGIN_NAME = "Omni-AI v3.8"
 GROQ_KEY = os.getenv("GROQ_API_KEY")
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 
@@ -28,11 +28,11 @@ GEMINI_URLS = [
 ]
 groq_client = Groq(api_key=GROQ_KEY) if GROQ_KEY else None
 
-# Updated System Prompt to acknowledge search
-SYSTEM_PROMPT = (
-    "You are a professional AI Assistant built by Detor. Today is April 12, 2026. "
-    "Always prioritize the 'Web Context' provided to answer about recent events. "
-    "Be concise, don't translate questions, and talk in Hinglish/Hindi."
+# Sabse Solid System Prompt
+COMMON_INSTRUCTION = (
+    "You are a smart AI Assistant built by Detor. Today is April 12, 2026. "
+    "If Web Context is provided, use it to give the latest information. "
+    "Don't confuse yourself with other models. Answer in Hinglish/Hindi directly."
 )
 
 mark_plugin_loaded("ai.py")
@@ -42,30 +42,27 @@ mark_plugin_loaded("ai.py")
 # =====================
 
 async def get_web_context(query: str) -> str:
-    """Railway-safe Search with better snippet extraction"""
-    if len(query) < 5: return ""
+    """Enhanced Search Logic for 2026"""
+    if len(query) < 4: return ""
     try:
-        # Searching with specific keywords for better results
-        search_query = f"{query} latest news 2026"
-        with DDGS(timeout=15) as ddgs:
-            results = list(ddgs.text(search_query, region='wt-wt', max_results=3))
+        # Strict 2026 search to avoid old IPL data
+        with DDGS(timeout=20) as ddgs:
+            results = list(ddgs.text(f"{query} current news April 2026", region='wt-wt', max_results=3))
             if results:
-                return "\n".join([f"Recent Info: {r['body']}" for r in results])
-    except Exception as e:
-        print(f"Search Error: {e}")
+                return "\n".join([f"- {r['body']}" for r in results])
+    except: pass
     return ""
 
 async def call_gemini(prompt: str, context: str = ""):
     if not GEMINI_KEY: return None
     headers = {'Content-Type': 'application/json'}
-    # Combined prompt with Search Context
-    final_text = f"{SYSTEM_PROMPT}\n\nLATEST WEB CONTEXT:\n{context}\n\nUSER QUESTION: {prompt}"
-    payload = {"contents": [{"parts": [{"text": final_text}]}]}
-    
+    payload = {
+        "contents": [{"parts": [{"text": f"{COMMON_INSTRUCTION}\n\nLATEST WEB DATA:\n{context}\n\nUSER QUESTION: {prompt}"}]}]
+    }
     async with aiohttp.ClientSession() as session:
         for url in GEMINI_URLS:
             try:
-                async with session.post(url, headers=headers, json=payload, timeout=20) as resp:
+                async with session.post(url, headers=headers, json=payload, timeout=25) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         return data['candidates'][0]['content']['parts'][0]['text']
@@ -75,12 +72,11 @@ async def call_gemini(prompt: str, context: str = ""):
 async def call_groq(prompt: str, context: str = ""):
     if not groq_client: return None
     try:
-        # Passing context directly into Groq's system message
         chat = await asyncio.to_thread(
             groq_client.chat.completions.create,
             model="llama-3.3-70b-versatile",
             messages=[
-                {"role": "system", "content": f"{SYSTEM_PROMPT}\n\nWeb Data: {context}"},
+                {"role": "system", "content": f"{COMMON_INSTRUCTION}\n\nREAL-TIME CONTEXT:\n{context}"},
                 {"role": "user", "content": prompt}
             ]
         )
@@ -103,34 +99,43 @@ async def smart_ai(e):
         query = reply.text
         
     if not query:
-        return await auto_delete(await e.edit("`Usage: .ai <question>`"), 5)
+        return await auto_delete(await e.edit("`Bolo bhai, kya puchna hai? (e.g. .ai aaj ipl match kiska hai)`"), 5)
 
-    await e.edit(f"`⚡ Searching & Analyzing...`")
+    await e.edit(f"`🔍 Thinking... (Searching Web)`")
     
-    # 1. Web Search Trigger
+    # Search Trigger
     context = await get_web_context(query)
     
-    # 2. Logic Check
-    code_keywords = ['python', 'code', 'script', 'html', 'fix']
-    is_coding = any(word in query.lower() for word in code_keywords)
+    code_words = ['python', 'code', 'script', 'fix', 'error', 'database', 'html']
+    is_coding = any(word in query.lower() for word in code_words)
 
-    if cmd in ['jarvis', 'Jarvis', 'edith', 'gemini', 'code'] or is_coding:
+    # Smart Routing
+    if cmd in ['jarvis', 'edith', 'gemini', 'code'] or is_coding:
         ans = await call_gemini(query, context)
-        source = "Gemini Flash (Live)"
+        source = "Gemini Flash (Pro Mode)"
         if not ans:
             ans = await call_groq(query, context)
-            source = "Groq (Backup)"
+            source = "Groq (Backup Mode)"
     else:
         ans = await call_groq(query, context)
-        source = "Groq (Fast Live)"
+        source = "Groq (Fast Mode)"
         if not ans:
             ans = await call_gemini(query, context)
-            source = "Gemini (Backup)"
+            source = "Gemini (Backup Mode)"
 
     if not ans:
-        return await e.edit("❌ `Engines failed. Check Keys.`")
+        return await e.edit("❌ `API Limit reached or Connection Error!`")
 
     await auto_delete(await e.edit(f"✨ **Model:** `{source}`\n\n{ans}"), 300)
 
-# ... (Health and Registry remain the same) ...
-                                     
+@bot.on(events.NewMessage(pattern=r"\.aihealth$"))
+async def health(e):
+    if not is_owner(e): return
+    await e.edit("`📡 Checking Engines...`")
+    g = "🟢" if await call_gemini("hi") else "🔴"
+    q = "🟢" if (GROQ_KEY and await call_groq("hi")) else "🔴"
+    await auto_delete(await e.edit(f"🛠 **Status:**\nGemini: {g}\nGroq: {q}\nWeb: 🟢"), 20)
+
+register_help("ai", ".ai | .code | .jarvis | .edith")
+register_explain("ai", "🤖 Omni-AI v3.8 (Web Fixed)")
+    

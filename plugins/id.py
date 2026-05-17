@@ -78,4 +78,3 @@ async def get_id(e):
 
     except Exception as ex:
         await log_error(bot, "id.py", ex)
-        

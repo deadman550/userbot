@@ -25,7 +25,7 @@ from utils.local_store import (
 PLUGIN_NAME = "antipm.py"
 
 mark_plugin_loaded(PLUGIN_NAME)
-print("✔ antipm.py loaded (local_store + mute mode)")
+print("✔ antipm.py loaded (local_store + mute mode + auto approve)")
 
 # =====================
 # CONFIG
@@ -88,6 +88,7 @@ register_help(
     "• Local disk based\n"
     "• Block / Mute mode\n"
     "• Warning replace system\n"
+    "• Auto-approve on owner reply\n"
     "• DM only"
 )
 
@@ -252,10 +253,19 @@ async def disapprove_user(e):
 
     uid = await resolve_user(e)
     if uid:
-        reset_user(uid)
+        # User ko database mein actively disapprove mark karo
+        save_user(uid, {
+            "approved": False,
+            "warnings": 0,
+            "msgs": [],
+            "muted_until": None
+        })
 
+    # Naya message bhejne ki jagah purane (command wale) message ko edit karo
+    # Isse outgoing event trigger nahi hoga aur auto-approve bypass ho jayega
+    await e.edit("❌ User disapproved")
+    await asyncio.sleep(3)
     await e.delete()
-    await bot.send_message(e.chat_id, "❌ User disapproved")
 
 
 @bot.on(events.NewMessage(pattern=r"\.resetwarn(?:\s+(.+))?$"))
@@ -279,6 +289,37 @@ async def resetwarn(e):
 
 
 # =====================
+# AUTO APPROVAL
+# =====================
+@bot.on(events.NewMessage(outgoing=True))
+async def auto_approve_handler(e):
+    # Agar message private chat mein hai, toh user ko auto-approve kar do
+    if not e.is_private:
+        return
+
+    # Pura fix yahan hai: Commands aur bot messages par auto-approve mat karo
+    if e.text and (e.text.startswith(".") or e.text.startswith("❌") or e.text.startswith("✅") or e.text.startswith("🔄") or e.text.startswith("🛡")):
+        return
+
+    try:
+        uid = e.chat_id
+        u = get_user(uid)
+        
+        # Agar user pehle se approved hai toh ignore karo
+        if u and u.get("approved"):
+            return
+            
+        # Naya / Unapproved user silently approve ho jayega
+        save_user(uid, {
+            "approved": True,
+            "warnings": 0,
+            "msgs": [],
+            "muted_until": None
+        })
+    except Exception as ex:
+        pass
+
+# =====================
 # MAIN HANDLER
 # =====================
 @bot.on(events.NewMessage(incoming=True))
@@ -300,8 +341,13 @@ async def antipm_handler(e):
         u = get_user(uid)
         now = time.time()
 
-        # muted user → ignore
+                # muted user → ignore and auto-delete
         if u and u.get("muted_until") and now < u["muted_until"]:
+            try:
+                # User ka bheja gaya naya message turant delete ho jayega
+                await e.delete()
+            except Exception:
+                pass
             return
 
         if u and u.get("approved"):
@@ -368,3 +414,4 @@ async def antipm_handler(e):
     except Exception as ex:
         mark_plugin_error(PLUGIN_NAME, ex)
         await log_error(bot, PLUGIN_NAME, ex)
+        

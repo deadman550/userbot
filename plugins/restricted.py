@@ -31,7 +31,7 @@ def parse_target(raw: str):
 # =====================
 # SAVE RESTRICTED CONTENT
 # =====================
-@bot.on(events.NewMessage(pattern=r"\.save(?:\s+(.*))?$"))
+@bot.on(events.NewMessage(pattern=r"\.sr(?:\s+(.*))?$"))
 async def save_restricted(e):
     # Sirf owner ke messages aur replies par kaam karega
     if not is_owner(e) or not e.is_reply:

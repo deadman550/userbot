@@ -84,11 +84,13 @@ async def purge_handler(e):
             min_id=start_id - 1,
             max_id=end_id
         ):
-            if admin or msg.sender_id == user_id:
+            # e.is_private check add kiya taaki DM (Private Chat) me samne wale ke messages bhi pick ho jayein
+            if admin or e.is_private or msg.sender_id == user_id:
                 msg_ids.append(msg.id)
 
         for i in range(0, len(msg_ids), 100):
-            await bot.delete_messages(chat_id, msg_ids[i:i + 100])
+            # revoke=True lagane se DM me both side se delete hoga
+            await bot.delete_messages(chat_id, msg_ids[i:i + 100], revoke=True)
             await asyncio.sleep(0.5)
 
         done = await bot.send_message(chat_id, "✅ Purge complete")

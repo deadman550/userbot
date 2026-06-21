@@ -12,4 +12,4 @@ google-generativeai==0.8.3
 groq
 ddgs>=6.2.2
 psutil
-pytgcalls>=3.0.0
+pytgcalls==3.0.0.dev24
